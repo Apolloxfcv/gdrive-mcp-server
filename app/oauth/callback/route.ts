@@ -1,43 +1,50 @@
 import { NextResponse } from "next/server";
+import { isAllowedRedirectUri, oauthError } from "@/lib/oauth-config";
+import { nowSeconds, seal, unseal } from "@/lib/seal";
+
+export const runtime = "nodejs";
+
+/** Duree de vie du code d'autorisation remis au client MCP. */
+const CODE_TTL_SECONDS = 5 * 60;
+
+type RelayState = { cs: string; ru: string; cc: string; cid: string; gv: string };
 
 /**
  * Endpoint /oauth/callback : recoit le retour de Google apres consentement.
- * On decode le state relaye pour retrouver le redirect_uri et le state
- * ORIGINAUX du client MCP, puis on redirige vers ce client avec le code
- * d'autorisation Google. Le client MCP echangera ensuite ce code contre
- * un token via /oauth/token.
  *
- * Toujours stateless : aucune donnee n'est persistee, tout transite dans
- * les parametres d'URL (le "code" Google est ephemere et a usage unique).
+ * Le state est dechiffre et verifie (authenticite + expiration). Le code
+ * Google n'est jamais remis tel quel au client : il est scelle avec le
+ * code_challenge, le redirect_uri et le client_id du client MCP, ce qui
+ * permet a /oauth/token de verifier PKCE sans aucun stockage serveur.
  */
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  const code = url.searchParams.get("code");
-  const relayState = url.searchParams.get("state");
-  const error = url.searchParams.get("error");
+  const googleCode = url.searchParams.get("code");
+  const googleError = url.searchParams.get("error");
 
-  if (error) {
-    return NextResponse.json({ error, error_description: "Autorisation Google refusee" }, { status: 400 });
-  }
-  if (!code || !relayState) {
-    return NextResponse.json({ error: "invalid_request", error_description: "code ou state manquant" }, { status: 400 });
+  const relay = unseal<RelayState>("state", url.searchParams.get("state"));
+  // Double verification de la liste blanche (au cas ou elle aurait change depuis /authorize).
+  if (!relay || !isAllowedRedirectUri(relay.ru)) {
+    return oauthError("invalid_request", "state invalide ou expire");
   }
 
-  let decoded: {
-    clientState: string;
-    clientRedirectUri: string;
-    codeChallenge: string;
-    codeChallengeMethod: string;
-  };
-  try {
-    decoded = JSON.parse(Buffer.from(relayState, "base64url").toString("utf-8"));
-  } catch {
-    return NextResponse.json({ error: "invalid_request", error_description: "state invalide" }, { status: 400 });
+  const back = new URL(relay.ru);
+  if (relay.cs) back.searchParams.set("state", relay.cs);
+
+  if (googleError || !googleCode) {
+    back.searchParams.set("error", googleError === "access_denied" ? "access_denied" : "server_error");
+    return NextResponse.redirect(back.toString());
   }
 
-  const finalRedirect = new URL(decoded.clientRedirectUri);
-  finalRedirect.searchParams.set("code", code);
-  if (decoded.clientState) finalRedirect.searchParams.set("state", decoded.clientState);
+  const code = seal("code", {
+    gc: googleCode,
+    gv: relay.gv,
+    cc: relay.cc,
+    ru: relay.ru,
+    cid: relay.cid,
+    exp: nowSeconds() + CODE_TTL_SECONDS,
+  });
+  back.searchParams.set("code", code);
 
-  return NextResponse.redirect(finalRedirect.toString());
+  return NextResponse.redirect(back.toString());
 }

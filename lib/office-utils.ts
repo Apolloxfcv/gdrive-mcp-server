@@ -7,6 +7,8 @@ import {
   patchDocument,
   PatchType,
 } from "docx";
+import JSZip from "jszip";
+import { MAX_UNCOMPRESSED_BYTES, UserFacingError } from "./tool-guards";
 
 /**
  * Utilitaires de lecture/ecriture pour fichiers Office binaires (.xlsx, .docx)
@@ -19,9 +21,36 @@ import {
  * sur un binaire ZIP/XML comme le sont .xlsx et .docx).
  */
 
+// ---------- ZIP ----------
+
+/**
+ * Protection contre les "zip bombs" : un .xlsx/.docx de quelques Mo peut se
+ * decompresser en plusieurs Go et faire tomber la fonction. On lit le
+ * repertoire central (tailles declarees) avant toute decompression.
+ */
+async function loadZipSafely(buffer: Buffer): Promise<JSZip> {
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(buffer);
+  } catch {
+    throw new UserFacingError("Fichier Office invalide (archive ZIP illisible).");
+  }
+  let total = 0;
+  let entries = 0;
+  zip.forEach((_path, file) => {
+    entries++;
+    total += (file as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0;
+  });
+  if (entries > 10_000 || total > MAX_UNCOMPRESSED_BYTES) {
+    throw new UserFacingError("Fichier Office refuse : contenu decompresse trop volumineux.");
+  }
+  return zip;
+}
+
 // ---------- XLSX ----------
 
 export async function readXlsxAsJson(buffer: Buffer) {
+  await loadZipSafely(buffer);
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer as any);
 
@@ -42,12 +71,13 @@ export async function updateXlsxCells(
   sheetName: string,
   updates: { cell: string; value: string | number | boolean }[]
 ): Promise<Buffer> {
+  await loadZipSafely(buffer);
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer as any);
 
   const worksheet = workbook.getWorksheet(sheetName);
   if (!worksheet) {
-    throw new Error(
+    throw new UserFacingError(
       `Feuille "${sheetName}" introuvable. Feuilles disponibles: ${workbook.worksheets
         .map((w) => w.name)
         .join(", ")}`
@@ -76,10 +106,9 @@ export async function createXlsx(
 // ---------- DOCX ----------
 
 export async function readDocxAsText(buffer: Buffer): Promise<string> {
-  const JSZip = (await import("jszip")).default;
-  const zip = await JSZip.loadAsync(buffer);
+  const zip = await loadZipSafely(buffer);
   const documentXml = await zip.file("word/document.xml")?.async("string");
-  if (!documentXml) throw new Error("document.xml introuvable dans ce .docx");
+  if (!documentXml) throw new UserFacingError("document.xml introuvable dans ce .docx");
 
   const text = documentXml
     .replace(/<w:p[ >]/g, "\n<w:p>")
@@ -107,6 +136,7 @@ export async function patchDocxPlaceholders(
   buffer: Buffer,
   replacements: Record<string, string>
 ): Promise<Buffer> {
+  await loadZipSafely(buffer);
   const patches: Record<string, any> = {};
   for (const [key, value] of Object.entries(replacements)) {
     patches[key] = {
