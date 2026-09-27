@@ -1,6 +1,14 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { getDriveClient, extractBearerToken } from "@/lib/drive-client";
+import {
+  readXlsxAsJson,
+  updateXlsxCells,
+  createXlsx,
+  readDocxAsText,
+  createDocx,
+  patchDocxPlaceholders,
+} from "@/lib/office-utils";
 
 /**
  * Serveur MCP Google Drive - 100% stateless.
@@ -209,6 +217,221 @@ const handler = createMcpHandler(
             { type: "text", text: JSON.stringify(res.data, null, 2) },
           ],
         };
+      }
+    );
+
+    server.tool(
+      "drive_read_office_file",
+      "Lit le contenu d'un fichier .xlsx ou .docx stocke tel quel sur Drive (pas un Google Sheets/Docs natif). Pour .xlsx, retourne toutes les feuilles sous forme de tableaux JSON. Pour .docx, retourne le texte brut extrait.",
+      {
+        fileId: z.string().describe("ID du fichier .xlsx ou .docx sur Drive"),
+      },
+      async ({ fileId }, extra) => {
+        const token = extractBearerToken(extra?.requestInfo?.headers as Headers | undefined);
+        const drive = getDriveClient(token);
+
+        const meta = await drive.files.get({ fileId, fields: "name, mimeType" });
+        const name = meta.data.name ?? "";
+        const downloaded = await drive.files.get(
+          { fileId, alt: "media" },
+          { responseType: "arraybuffer" }
+        );
+        const buffer = Buffer.from(downloaded.data as ArrayBuffer);
+
+        if (name.endsWith(".xlsx")) {
+          const sheets = await readXlsxAsJson(buffer);
+          return { content: [{ type: "text", text: JSON.stringify(sheets, null, 2) }] };
+        }
+        if (name.endsWith(".docx")) {
+          const text = await readDocxAsText(buffer);
+          return { content: [{ type: "text", text }] };
+        }
+        throw new Error("Ce fichier n'est ni un .xlsx ni un .docx (extension non reconnue).");
+      }
+    );
+
+    server.tool(
+      "drive_update_xlsx_cells",
+      "Modifie des cellules specifiques dans un fichier .xlsx existant sur Drive, puis re-uploade le fichier complet (ecriture). Ne fonctionne que sur des fichiers .xlsx binaires, pas sur des Google Sheets natifs.",
+      {
+        fileId: z.string().describe("ID du fichier .xlsx sur Drive"),
+        sheetName: z.string().describe("Nom de la feuille a modifier"),
+        updates: z
+          .array(
+            z.object({
+              cell: z.string().describe("Reference de cellule, ex: 'B3'"),
+              value: z.union([z.string(), z.number(), z.boolean()]),
+            })
+          )
+          .describe("Liste des cellules a mettre a jour"),
+      },
+      async ({ fileId, sheetName, updates }, extra) => {
+        const token = extractBearerToken(extra?.requestInfo?.headers as Headers | undefined);
+        const drive = getDriveClient(token);
+
+        const downloaded = await drive.files.get(
+          { fileId, alt: "media" },
+          { responseType: "arraybuffer" }
+        );
+        const original = Buffer.from(downloaded.data as ArrayBuffer);
+
+        const updated = await updateXlsxCells(original, sheetName, updates);
+
+        const res = await drive.files.update({
+          fileId,
+          media: {
+            mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            body: updated,
+          },
+          fields: "id, name, modifiedTime, webViewLink",
+        });
+
+        return { content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "drive_create_xlsx",
+      "Cree un nouveau fichier .xlsx sur Drive a partir d'un tableau de lignes (ecriture).",
+      {
+        name: z.string().describe("Nom du fichier, ex: 'rapport.xlsx'"),
+        sheetName: z.string().default("Sheet1"),
+        rows: z
+          .array(z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])))
+          .describe("Tableau de lignes, chaque ligne est un tableau de valeurs de cellules"),
+        parentFolderId: z.string().optional(),
+      },
+      async ({ name, sheetName, rows, parentFolderId }, extra) => {
+        const token = extractBearerToken(extra?.requestInfo?.headers as Headers | undefined);
+        const drive = getDriveClient(token);
+
+        const buffer = await createXlsx(sheetName, rows);
+
+        const res = await drive.files.create({
+          requestBody: {
+            name: name.endsWith(".xlsx") ? name : `${name}.xlsx`,
+            parents: parentFolderId ? [parentFolderId] : undefined,
+          },
+          media: {
+            mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            body: buffer,
+          },
+          fields: "id, name, webViewLink",
+        });
+
+        return { content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "drive_create_docx",
+      "Cree un nouveau fichier .docx sur Drive a partir d'une liste de paragraphes (ecriture).",
+      {
+        name: z.string().describe("Nom du fichier, ex: 'note.docx'"),
+        paragraphs: z.array(z.string()).describe("Liste des paragraphes du document"),
+        parentFolderId: z.string().optional(),
+      },
+      async ({ name, paragraphs, parentFolderId }, extra) => {
+        const token = extractBearerToken(extra?.requestInfo?.headers as Headers | undefined);
+        const drive = getDriveClient(token);
+
+        const buffer = await createDocx(paragraphs);
+
+        const res = await drive.files.create({
+          requestBody: {
+            name: name.endsWith(".docx") ? name : `${name}.docx`,
+            parents: parentFolderId ? [parentFolderId] : undefined,
+          },
+          media: {
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            body: buffer,
+          },
+          fields: "id, name, webViewLink",
+        });
+
+        return { content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "drive_patch_docx_placeholders",
+      "Remplace des placeholders {{cle}} dans un .docx existant sur Drive par des valeurs, en preservant la mise en forme, puis re-uploade le fichier (ecriture).",
+      {
+        fileId: z.string().describe("ID du fichier .docx sur Drive"),
+        replacements: z
+          .record(z.string(), z.string())
+          .describe("Map cle -> valeur, ex: {\"nom\": \"Jean Dupont\"} remplace {{nom}}"),
+      },
+      async ({ fileId, replacements }, extra) => {
+        const token = extractBearerToken(extra?.requestInfo?.headers as Headers | undefined);
+        const drive = getDriveClient(token);
+
+        const downloaded = await drive.files.get(
+          { fileId, alt: "media" },
+          { responseType: "arraybuffer" }
+        );
+        const original = Buffer.from(downloaded.data as ArrayBuffer);
+
+        const patched = await patchDocxPlaceholders(original, replacements);
+
+        const res = await drive.files.update({
+          fileId,
+          media: {
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            body: patched,
+          },
+          fields: "id, name, modifiedTime, webViewLink",
+        });
+
+        return { content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "drive_rename_file",
+      "Renomme un fichier ou un dossier Google Drive (ecriture).",
+      {
+        fileId: z.string().describe("ID du fichier ou dossier"),
+        newName: z.string().describe("Nouveau nom"),
+      },
+      async ({ fileId, newName }, extra) => {
+        const token = extractBearerToken(extra?.requestInfo?.headers as Headers | undefined);
+        const drive = getDriveClient(token);
+
+        const res = await drive.files.update({
+          fileId,
+          requestBody: { name: newName },
+          fields: "id, name, webViewLink",
+        });
+
+        return { content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "drive_move_file",
+      "Deplace un fichier ou un dossier vers un nouveau dossier parent sur Google Drive (ecriture).",
+      {
+        fileId: z.string().describe("ID du fichier ou dossier a deplacer"),
+        newParentFolderId: z.string().describe("ID du nouveau dossier parent"),
+      },
+      async ({ fileId, newParentFolderId }, extra) => {
+        const token = extractBearerToken(extra?.requestInfo?.headers as Headers | undefined);
+        const drive = getDriveClient(token);
+
+        const current = await drive.files.get({ fileId, fields: "parents" });
+        const previousParents = (current.data.parents ?? []).join(",");
+
+        const res = await drive.files.update({
+          fileId,
+          addParents: newParentFolderId,
+          removeParents: previousParents,
+          fields: "id, name, parents, webViewLink",
+        });
+
+        return { content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }] };
       }
     );
   },
