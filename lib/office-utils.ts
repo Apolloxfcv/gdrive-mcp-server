@@ -115,10 +115,12 @@ export async function patchDocxPlaceholders(
     };
   }
 
+  // "nodebuffer" est la valeur valide pour un environnement Node.js/serverless
+  // (pas "buffer", qui n'existe pas dans le type OutputByType de la lib docx).
   const patched = await patchDocument({
-    outputType: "buffer",
+    outputType: "nodebuffer",
     data: buffer,
     patches,
   });
-  return Buffer.from(patched as any);
+  return Buffer.from(patched);
 }
