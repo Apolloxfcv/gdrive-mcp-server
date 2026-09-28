@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import { google } from "googleapis";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import { DRIVE_SCOPE, legacyTokensAllowed } from "./oauth-config";
+import { isSealed, unseal } from "./seal";
 
 /**
  * Construit un client Google Drive authentifie a partir d'un access token
- * fourni par requete (mode stateless). Aucun token n'est jamais stocke
- * en memoire ou sur disque cote serveur.
+ * Google fourni par requete (mode stateless). Aucun token n'est stocke.
  */
 export function getDriveClient(accessToken: string) {
   const auth = new google.auth.OAuth2();
@@ -11,22 +14,66 @@ export function getDriveClient(accessToken: string) {
   return google.drive({ version: "v3", auth });
 }
 
+type SealedAccess = { gat: string; cid: string; exp: number };
+
 /**
- * Extrait le bearer token Google depuis les headers de la requete HTTP
- * entrante. mcp-handler expose les headers originaux via `extra.request`
- * / `extra.requestInfo` selon la version du SDK; on lit directement
- * l'objet Headers standard Web API par robustesse.
+ * Verifie le bearer token presente au endpoint MCP. Seuls les tokens emis
+ * (scelles) par /oauth/token sont acceptes : un token Google obtenu par une
+ * autre application ne peut pas etre rejoue ici ("token passthrough").
  */
-export function extractBearerToken(headers: Headers | undefined): string {
-  const raw = headers?.get("authorization") ?? headers?.get("Authorization");
-  if (!raw) {
-    throw new Error(
-      "Aucun token trouve. Le client MCP doit envoyer 'Authorization: Bearer <google_access_token>' a chaque requete."
-    );
+export async function verifyAccessToken(bearerToken?: string): Promise<AuthInfo | undefined> {
+  if (!bearerToken) return undefined;
+
+  if (isSealed(bearerToken)) {
+    const at = unseal<SealedAccess>("access_token", bearerToken);
+    if (!at?.gat) return undefined;
+    return {
+      token: at.gat,
+      clientId: at.cid || "mcp-client",
+      scopes: [DRIVE_SCOPE],
+      expiresAt: at.exp,
+    };
   }
-  const match = raw.match(/^Bearer\s+(.+)$/i);
-  if (!match) {
-    throw new Error("Le header Authorization doit etre au format 'Bearer <token>'.");
+
+  if (legacyTokensAllowed()) return verifyLegacyGoogleToken(bearerToken);
+  return undefined;
+}
+
+// ---------- Transition : tokens Google bruts emis par l'ancienne version ----------
+
+const legacyCache = new Map<string, { info: AuthInfo; until: number }>();
+const LEGACY_CACHE_MS = 5 * 60 * 1000;
+
+async function verifyLegacyGoogleToken(token: string): Promise<AuthInfo | undefined> {
+  const key = createHash("sha256").update(token).digest("hex");
+  const cached = legacyCache.get(key);
+  if (cached && cached.until > Date.now()) return cached.info;
+
+  try {
+    const res = await fetch("https://oauth2.googleapis.com/tokeninfo", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ access_token: token }).toString(),
+      cache: "no-store",
+    });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { aud?: string; scope?: string; exp?: string };
+
+    // Le token doit avoir ete emis pour NOTRE application Google, avec le scope Drive.
+    if (!data.aud || data.aud !== process.env.GOOGLE_OAUTH_CLIENT_ID) return undefined;
+    const scopes = (data.scope ?? "").split(" ");
+    if (!scopes.includes(DRIVE_SCOPE)) return undefined;
+
+    const info: AuthInfo = {
+      token,
+      clientId: "legacy-google-token",
+      scopes,
+      expiresAt: data.exp ? Number(data.exp) : undefined,
+    };
+    if (legacyCache.size > 500) legacyCache.clear();
+    legacyCache.set(key, { info, until: Date.now() + LEGACY_CACHE_MS });
+    return info;
+  } catch {
+    return undefined;
   }
-  return match[1];
 }

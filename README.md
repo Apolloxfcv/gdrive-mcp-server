@@ -21,7 +21,7 @@ fonctions serverless Next.js, avec transport **Streamable HTTP**.
 | `drive_read_file` | Lit le contenu texte (Google Docs/Sheets natifs ou texte brut) | Non |
 | `drive_create_file` | Cree un fichier texte brut | Oui |
 | `drive_update_file` | Modifie le contenu d'un fichier texte brut | Oui |
-| `drive_delete_file` | Supprime un fichier | Oui |
+| `drive_delete_file` | Met un fichier a la corbeille (recuperable 30 jours) | Oui |
 | `drive_create_folder` | Cree un dossier | Oui |
 | `drive_rename_file` | Renomme un fichier ou dossier | Oui |
 | `drive_move_file` | Deplace un fichier ou dossier vers un autre parent | Oui |
@@ -44,28 +44,29 @@ fonctions serverless Next.js, avec transport **Streamable HTTP**.
 - Pas de gestion de commentaires ou de suggestions Word/Docs (mode revision)
   dans cette version.
 
-## Obtenir un token Google OAuth
+## Authentification (proxy OAuth vers Google)
 
-Ce serveur ne gere pas le flow OAuth lui-meme (il resterait sinon avec
-etat). Deux options :
+Le serveur expose ses propres endpoints OAuth (`/authorize`, `/oauth/callback`,
+`/oauth/token`, decouverte sous `/.well-known/`) et relaie vers Google, sans
+aucun stockage : state, codes et tokens remis au client MCP sont **scelles**
+(AES-256-GCM avec `OAUTH_TOKEN_SECRET`). Le client ne voit jamais les tokens
+Google en clair, et le endpoint MCP n'accepte que les tokens emis par ce serveur.
 
-1. **Cote client MCP** : si ton client supporte OAuth 2.1 pour les
-   connecteurs MCP distants, il gerera le flow et injectera automatiquement
-   le bearer token Google a chaque requete.
-2. **Manuellement pour tester** : utilise Google OAuth Playground
-   (https://developers.google.com/oauthplayground) avec le scope
-   `https://www.googleapis.com/auth/drive`.
+- PKCE S256 obligatoire.
+- Seuls les `redirect_uri` listes dans `ALLOWED_REDIRECT_URIS` sont acceptes.
 
 ## Deploiement sur Vercel
 
 1. Cree un projet Google Cloud, active l'API Google Drive, cree des
    credentials OAuth 2.0 (type "Web application").
-2. Ajoute l'URL de callback de ton client MCP dans les "Authorized
-   redirect URIs" de ce credential Google.
-3. Push ce repo sur GitHub, importe-le dans Vercel.
+2. Ajoute `https://<ton-projet>.vercel.app/oauth/callback` dans les
+   "Authorized redirect URIs" de ce credential Google.
+3. Renseigne les variables d'environnement (voir `.env.example`) :
+   `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+   `OAUTH_TOKEN_SECRET`, `ALLOWED_REDIRECT_URIS`, `PUBLIC_BASE_URL`.
 4. Deploie. L'URL du serveur MCP sera :
    `https://<ton-projet>.vercel.app/api/mcp`
-5. Ajoute cette URL comme connecteur MCP distant dans Perplexity.
+5. Ajoute cette URL comme connecteur MCP distant dans ton client.
 
 ## Developpement local
 
@@ -76,6 +77,9 @@ npm run dev
 
 ## Securite
 
+Voir [SECURITY_AUDIT.md](SECURITY_AUDIT.md) pour l'audit complet et la
+procedure de migration.
+
 - Ne jamais logger le contenu du header `Authorization`.
-- `drive_delete_file` est destructif et irreversible.
+- Changer `OAUTH_TOKEN_SECRET` revoque tous les tokens emis.
 - Limite les scopes OAuth demandes au strict necessaire.
