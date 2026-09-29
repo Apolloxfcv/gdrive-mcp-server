@@ -26,21 +26,29 @@ fonctions serverless Next.js, avec transport **Streamable HTTP**.
 | `drive_rename_file` | Renomme un fichier ou dossier | Oui |
 | `drive_move_file` | Deplace un fichier ou dossier vers un autre parent | Oui |
 | `drive_read_office_file` | Lit un .xlsx (toutes feuilles en JSON) ou .docx (texte extrait) | Non |
-| `drive_update_xlsx_cells` | Modifie des cellules precises dans un .xlsx existant | Oui |
+| `drive_update_xlsx_cells` | Modifie des cellules precises (Google Sheets natif : en place via l'API Sheets ; .xlsx : patch XML cible) | Oui |
 | `drive_create_xlsx` | Cree un nouveau .xlsx a partir de lignes de donnees | Oui |
 | `drive_create_docx` | Cree un nouveau .docx a partir de paragraphes | Oui |
 | `drive_patch_docx_placeholders` | Remplace des {{placeholders}} dans un .docx en gardant la mise en forme | Oui |
 
 ### Limites connues sur les fichiers Office (.xlsx/.docx)
 
-- Un .xlsx/.docx est un binaire ZIP+XML : toute modification (sauf le patch
-  de placeholders) telecharge le fichier complet, le modifie en memoire,
-  puis re-uploade le fichier entier. Il n'y a pas d'edition incrementale
-  possible cote API Drive pour ces formats.
-- Ces outils ne fonctionnent QUE sur des .xlsx/.docx binaires uploades tels
-  quels sur Drive. Pour des **Google Sheets/Docs natifs** (crees directement
-  dans Drive, pas uploades), il faudrait des outils separes bases sur les
-  API Google Sheets et Google Docs, non couverts par ce serveur.
+- Un .xlsx/.docx est un binaire ZIP+XML et l'API Drive n'offre pas d'ecriture
+  partielle : le fichier est toujours re-uploade en entier (meme ID, meme
+  historique de versions).
+- `drive_update_xlsx_cells` limite les degats : sur un .xlsx binaire, seul le XML
+  de la feuille visee est patche (cellules modifiees uniquement) ; graphiques,
+  images, tableaux croises, mises en forme, plages nommees et formules voisines
+  ne sont ni relus ni reecrits. Un controle md5 juste avant l'upload refuse
+  d'ecraser un fichier modifie entre-temps. Les formules partagees/matricielles
+  ne sont pas modifiables (refus explicite). Les valeurs sont ecrites telles
+  quelles (une chaine `=...` n'est pas interpretee comme formule).
+- Sur un **Google Sheets natif**, `drive_update_xlsx_cells` utilise l'API Google
+  Sheets (`spreadsheets.values.batchUpdate`) : edition directe en place, sans
+  telechargement ni upload. L'**API Google Sheets doit etre activee** dans le
+  projet Google Cloud (le scope `drive` suffit).
+- Les autres outils (lecture, creation, docx) ne fonctionnent que sur des
+  .xlsx/.docx binaires uploades tels quels sur Drive.
 - Pas de gestion de commentaires ou de suggestions Word/Docs (mode revision)
   dans cette version.
 

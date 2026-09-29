@@ -14,6 +14,13 @@ export function getDriveClient(accessToken: string) {
   return google.drive({ version: "v3", auth });
 }
 
+/** Meme principe que getDriveClient, pour l'API Google Sheets (edition en place des Sheets natifs). */
+export function getSheetsClient(accessToken: string) {
+  const auth = new google.auth.OAuth2();
+  auth.setCredentials({ access_token: accessToken });
+  return google.sheets({ version: "v4", auth });
+}
+
 type SealedAccess = { gat: string; cid: string; exp: number };
 
 /**

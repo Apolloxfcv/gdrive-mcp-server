@@ -17,8 +17,9 @@ import { MAX_UNCOMPRESSED_BYTES, UserFacingError } from "./tool-guards";
  * Principe stateless : ces fonctions travaillent uniquement sur des Buffer
  * en memoire, le temps d'une requete HTTP. Rien n'est jamais ecrit sur disque
  * cote serveur. Le fichier complet est telecharge depuis Drive, modifie en
- * memoire, puis re-uploade en entier (pas d'edition incrementale possible
- * sur un binaire ZIP/XML comme le sont .xlsx et .docx).
+ * memoire, puis re-uploade en entier (pas d'ecriture partielle possible sur un
+ * binaire ZIP/XML). Les modifications de cellules .xlsx sont dans xlsx-patch.ts
+ * (patch XML cible, sans aller-retour ExcelJS).
  */
 
 // ---------- ZIP ----------
@@ -28,7 +29,7 @@ import { MAX_UNCOMPRESSED_BYTES, UserFacingError } from "./tool-guards";
  * decompresser en plusieurs Go et faire tomber la fonction. On lit le
  * repertoire central (tailles declarees) avant toute decompression.
  */
-async function loadZipSafely(buffer: Buffer): Promise<JSZip> {
+export async function loadZipSafely(buffer: Buffer): Promise<JSZip> {
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(buffer);
@@ -64,32 +65,6 @@ export async function readXlsxAsJson(buffer: Buffer) {
     sheets[worksheet.name] = rows;
   });
   return sheets;
-}
-
-export async function updateXlsxCells(
-  buffer: Buffer,
-  sheetName: string,
-  updates: { cell: string; value: string | number | boolean }[]
-): Promise<Buffer> {
-  await loadZipSafely(buffer);
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer as any);
-
-  const worksheet = workbook.getWorksheet(sheetName);
-  if (!worksheet) {
-    throw new UserFacingError(
-      `Feuille "${sheetName}" introuvable. Feuilles disponibles: ${workbook.worksheets
-        .map((w) => w.name)
-        .join(", ")}`
-    );
-  }
-
-  for (const { cell, value } of updates) {
-    worksheet.getCell(cell).value = value;
-  }
-
-  const out = await workbook.xlsx.writeBuffer();
-  return Buffer.from(out);
 }
 
 export async function createXlsx(
