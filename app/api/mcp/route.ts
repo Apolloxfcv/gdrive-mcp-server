@@ -1,15 +1,15 @@
 import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import { z } from "zod";
-import { getDriveClient, verifyAccessToken } from "@/lib/drive-client";
+import { getDriveClient, getSheetsClient, verifyAccessToken } from "@/lib/drive-client";
 import { DRIVE_SCOPE } from "@/lib/oauth-config";
 import {
   readXlsxAsJson,
-  updateXlsxCells,
   createXlsx,
   readDocxAsText,
   createDocx,
   patchDocxPlaceholders,
 } from "@/lib/office-utils";
+import { updateXlsxCells } from "@/lib/xlsx-patch";
 import {
   UserFacingError,
   assertDownloadable,
@@ -41,14 +41,19 @@ const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: true
 const OVERWRITE = { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const GSHEET_MIME = "application/vnd.google-apps.spreadsheet";
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 type Extra = { authInfo?: { token: string } };
 
-function drive(extra: Extra) {
+function accessToken(extra: Extra) {
   const token = extra.authInfo?.token;
   if (!token) throw new UserFacingError("Non authentifie.");
-  return getDriveClient(token);
+  return token;
+}
+
+function drive(extra: Extra) {
+  return getDriveClient(accessToken(extra));
 }
 
 function json(data: unknown) {
@@ -56,13 +61,17 @@ function json(data: unknown) {
 }
 
 async function downloadBinary(d: ReturnType<typeof getDriveClient>, fileId: string) {
-  const meta = await d.files.get({ fileId, fields: "name, mimeType, size" });
+  const meta = await d.files.get({ fileId, fields: "name, mimeType, size, md5Checksum" });
   assertDownloadable(meta.data.size);
   const downloaded = await d.files.get(
     { fileId, alt: "media" },
     { responseType: "arraybuffer", ...downloadLimits }
   );
-  return { name: meta.data.name ?? "", buffer: Buffer.from(downloaded.data as ArrayBuffer) };
+  return {
+    name: meta.data.name ?? "",
+    md5: meta.data.md5Checksum,
+    buffer: Buffer.from(downloaded.data as ArrayBuffer),
+  };
 }
 
 const handler = createMcpHandler(
@@ -233,7 +242,7 @@ const handler = createMcpHandler(
 
     server.tool(
       "drive_update_xlsx_cells",
-      "Modifie des cellules specifiques dans un fichier .xlsx existant sur Drive, puis re-uploade le fichier complet (ecriture). Ne fonctionne que sur des fichiers .xlsx binaires, pas sur des Google Sheets natifs.",
+      "Modifie des cellules specifiques d'un tableur existant sur Drive (ecriture). Google Sheets natif : edition directe en place via l'API Sheets, aucun fichier telecharge ni re-uploade. Fichier .xlsx binaire : seules les cellules visees sont modifiees dans le XML de la feuille (styles, graphiques, formules voisines, etc. restent intacts) ; le fichier garde le meme ID. Les valeurs sont ecrites telles quelles (une chaine commencant par '=' n'est pas une formule).",
       {
         fileId: driveId.describe("ID du fichier .xlsx sur Drive"),
         sheetName: z.string().min(1).max(100).describe("Nom de la feuille a modifier"),
@@ -251,15 +260,42 @@ const handler = createMcpHandler(
       OVERWRITE,
       guarded(async ({ fileId, sheetName, updates }, extra: Extra) => {
         const d = drive(extra);
-        const { buffer } = await downloadBinary(d, fileId);
+        const meta = await d.files.get({ fileId, fields: "mimeType" });
+
+        // Google Sheets natif : edition directe en place, rien n'est telecharge ni re-uploade.
+        if (meta.data.mimeType === GSHEET_MIME) {
+          const quoted = `'${sheetName.replace(/'/g, "''")}'`;
+          const res = await getSheetsClient(accessToken(extra)).spreadsheets.values.batchUpdate({
+            spreadsheetId: fileId,
+            requestBody: {
+              valueInputOption: "RAW",
+              data: updates.map(({ cell, value }) => ({
+                range: `${quoted}!${cell.toUpperCase()}`,
+                values: [[value]],
+              })),
+            },
+          });
+          return json({ id: fileId, updatedCells: res.data.totalUpdatedCells, mode: "sheets-api" });
+        }
+
+        const { buffer, md5 } = await downloadBinary(d, fileId);
         const updated = await updateXlsxCells(buffer, sheetName, updates);
+
+        // Drive n'a pas de precondition sur l'upload : on verifie au plus pres que le
+        // fichier n'a pas change depuis le telechargement, pour ne rien ecraser.
+        const current = await d.files.get({ fileId, fields: "md5Checksum" });
+        if (current.data.md5Checksum !== md5) {
+          throw new UserFacingError(
+            "Le fichier a ete modifie sur Drive pendant l'operation : rien n'a ete ecrase. Reessayez."
+          );
+        }
 
         const res = await d.files.update({
           fileId,
           media: { mimeType: XLSX_MIME, body: updated },
           fields: "id, name, modifiedTime, webViewLink",
         });
-        return json(res.data);
+        return json({ ...res.data, mode: "xlsx-xml-patch" });
       })
     );
 
