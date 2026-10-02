@@ -18,7 +18,7 @@ fonctions serverless Next.js, avec transport **Streamable HTTP**.
 | Outil | Action | Ecriture |
 |---|---|---|
 | `drive_list_files` | Liste/recherche des fichiers | Non |
-| `drive_read_file` | Lit le contenu texte (Google Docs/Sheets natifs ou texte brut) | Non |
+| `drive_read_file` | Lit le contenu texte (Google Docs natifs, texte brut ; Google Sheets natif : export CSV de la 1re feuille) | Non |
 | `drive_create_file` | Cree un fichier texte brut | Oui |
 | `drive_update_file` | Modifie le contenu d'un fichier texte brut | Oui |
 | `drive_delete_file` | Met un fichier a la corbeille (recuperable 30 jours) | Oui |
@@ -29,7 +29,34 @@ fonctions serverless Next.js, avec transport **Streamable HTTP**.
 | `drive_update_xlsx_cells` | Modifie des cellules precises (Google Sheets natif : en place via l'API Sheets ; .xlsx : patch XML cible) | Oui |
 | `drive_create_xlsx` | Cree un nouveau .xlsx a partir de lignes de donnees | Oui |
 | `drive_create_docx` | Cree un nouveau .docx a partir de paragraphes | Oui |
+| `drive_read_spreadsheet` | Lit un Google Sheets natif OU un .xlsx : noms d'onglets, dimensions, valeurs alignees sur les coordonnees A1, formules optionnelles, plage/limite de lignes | Non |
+| `drive_sheets_batch_edit` | Modifie un Google Sheets natif en place, en UN appel atomique : ecrire des blocs (formules `=...`), ajouter des lignes, vider, mettre en forme, ajouter/renommer/supprimer des onglets, inserer/supprimer lignes et colonnes | Oui |
+| `drive_xlsx_batch_edit` | Modifie un .xlsx en place (plusieurs onglets, valeurs, formules, effacement, ajout de lignes) en un seul telechargement/upload, avec controle d'integrite avant ecriture | Oui |
+| `drive_read_docx_paragraphs` | Lit un .docx en paragraphes indexes (tableaux inclus) | Non |
+| `drive_docx_edit` | Modifie un .docx en place par XML cible : remplacer du texte (meme coupe entre plusieurs mises en forme), remplacer/inserer/ajouter/supprimer des paragraphes | Oui |
 | `drive_patch_docx_placeholders` | Remplace des {{placeholders}} dans un .docx en gardant la mise en forme | Oui |
+
+### Modifier sans casser un fichier
+
+Regle pour l'agent : **ne jamais supprimer/recreer un fichier ou un onglet pour le
+"modifier"**, ni utiliser `drive_update_file` sur un Sheets/.xlsx/.docx. Les
+outils `drive_sheets_batch_edit`, `drive_xlsx_batch_edit` et `drive_docx_edit`
+modifient en place (meme ID, historique et partages conserves) et acceptent
+des centaines d'operations par appel :
+
+- Google Sheets natif : un seul `spreadsheets.batchUpdate` -> atomique (tout passe ou rien).
+- .xlsx / .docx : un telechargement, patch XML des seules parties visees (le reste
+  de l'archive est recopie tel quel), relecture du resultat avant l'upload, refus
+  d'ecraser si le fichier a change entre-temps.
+- Ordre conseille : `drive_read_spreadsheet` / `drive_read_docx_paragraphs` d'abord
+  (noms d'onglets et index exacts), puis un seul appel d'edition.
+
+Limites : sur un .xlsx binaire, pas d'insertion/suppression de lignes/colonnes ni
+d'onglets (decalage des references = risque de corruption ; convertir en Google
+Sheets ou utiliser `drive_sheets_batch_edit`) ; ne pas modifier les en-tetes d'un
+tableau Excel formate ; ecriture dans une cellule fusionnee refusee hors cellule
+haut-gauche. Sur .docx : corps du document uniquement (pas en-tetes/pieds de
+page), pas de creation de tableaux ni de mode revision.
 
 ### Limites connues sur les fichiers Office (.xlsx/.docx)
 
@@ -65,7 +92,7 @@ Google en clair, et le endpoint MCP n'accepte que les tokens emis par ce serveur
 
 ## Deploiement sur Vercel
 
-1. Cree un projet Google Cloud, active l'API Google Drive, cree des
+1. Cree un projet Google Cloud, active l'API Google Drive **et l'API Google Sheets**, cree des
    credentials OAuth 2.0 (type "Web application").
 2. Ajoute `https://<ton-projet>.vercel.app/oauth/callback` dans les
    "Authorized redirect URIs" de ce credential Google.
