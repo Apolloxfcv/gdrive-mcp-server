@@ -35,6 +35,18 @@ fonctions serverless Next.js, avec transport **Streamable HTTP**.
 | `drive_read_docx_paragraphs` | Lit un .docx en paragraphes indexes (tableaux inclus) | Non |
 | `drive_docx_edit` | Modifie un .docx en place par XML cible : remplacer du texte (meme coupe entre plusieurs mises en forme), remplacer/inserer/ajouter/supprimer des paragraphes | Oui |
 | `drive_patch_docx_placeholders` | Remplace des {{placeholders}} dans un .docx en gardant la mise en forme | Oui |
+| `drive_read_pdf` | Lit le texte d'un PDF page par page (pas d'OCR) | Non |
+| `drive_create_pdf` | Cree un PDF depuis du Markdown (rendu Google, accents OK) | Oui |
+| `drive_read_pptx` | Lit le texte d'un .pptx diapositive par diapositive | Non |
+| `drive_create_google_doc` | Cree un Google Doc natif depuis du Markdown | Oui |
+| `drive_create_google_sheet` | Cree un Google Sheets natif (multi-onglets, formules) | Oui |
+| `drive_gdoc_edit` | Modifie un Google Doc natif en place (remplacer, ajouter au debut/fin), atomique | Oui |
+| `drive_convert_file` | Convertit en creant une copie : .xlsx/.docx/.pptx -> Google natif, Google natif -> Office, tout -> PDF | Oui |
+| `drive_copy_file` | Copie un fichier (nouvel ID) | Oui |
+| `drive_restore_file` | Sort un fichier de la corbeille | Oui |
+| `drive_text_edit` | Modifie un .md/.txt/.csv/.json par remplacement exact / ajout, avec controle md5 | Oui |
+| `drive_create_docx_markdown` | Cree un .docx riche (titres, listes, tableaux) depuis du Markdown | Oui |
+| `drive_create_xlsx_multi` | Cree un .xlsx multi-onglets avec formules | Oui |
 
 ### Modifier sans casser un fichier
 
@@ -76,6 +88,9 @@ page), pas de creation de tableaux ni de mode revision.
   projet Google Cloud (le scope `drive` suffit).
 - Les autres outils (lecture, creation, docx) ne fonctionnent que sur des
   .xlsx/.docx binaires uploades tels quels sur Drive.
+- `drive_create_file` / `drive_update_file` refusent les types non texte (PDF, Office, Google natif) pour ne pas les corrompre.
+- `drive_delete_file` met a la corbeille ; `drive_restore_file` l'annule. Il n'y a volontairement pas de suppression definitive.
+- Les PDF scannes (images) ne sont pas lisibles sans OCR.
 - Pas de gestion de commentaires ou de suggestions Word/Docs (mode revision)
   dans cette version.
 
@@ -92,7 +107,7 @@ Google en clair, et le endpoint MCP n'accepte que les tokens emis par ce serveur
 
 ## Deploiement sur Vercel
 
-1. Cree un projet Google Cloud, active l'API Google Drive **et l'API Google Sheets**, cree des
+1. Cree un projet Google Cloud, active l'API Google Drive, l'API Google Sheets **et l'API Google Docs** (necessaire pour `drive_gdoc_edit`), cree des
    credentials OAuth 2.0 (type "Web application").
 2. Ajoute `https://<ton-projet>.vercel.app/oauth/callback` dans les
    "Authorized redirect URIs" de ce credential Google.

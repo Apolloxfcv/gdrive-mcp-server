@@ -16,6 +16,7 @@ import { readXlsxGrids } from "@/lib/spreadsheet-read";
 import { buildSheetsBatch, sheetsOpSchema } from "@/lib/sheets-batch";
 import { docxOpsSchema, editDocx, readDocxParagraphs } from "@/lib/docx-edit";
 import { loadZipSafely } from "@/lib/office-utils";
+import { NON_TEXT_MIME_PATTERN, registerExtraTools } from "@/lib/extra-tools";
 import {
   UserFacingError,
   assertDownloadable,
@@ -130,9 +131,10 @@ const handler = createMcpHandler(
           .describe("Requete de recherche Drive, ex: \"name contains 'rapport'\""),
         folderId: driveId.optional().describe("ID du dossier parent dans lequel chercher"),
         pageSize: z.number().int().min(1).max(100).default(20),
+        pageToken: z.string().max(2000).optional().describe("nextPageToken d'un appel precedent"),
       },
       READ_ONLY,
-      guarded(async ({ query, folderId, pageSize }, extra: Extra) => {
+      guarded(async ({ query, folderId, pageSize, pageToken }, extra: Extra) => {
         const qParts: string[] = ["trashed = false"];
         if (query) qParts.push(`(${query})`);
         if (folderId) qParts.push(`'${folderId}' in parents`);
@@ -140,9 +142,12 @@ const handler = createMcpHandler(
         const res = await drive(extra).files.list({
           q: qParts.join(" and "),
           pageSize,
-          fields: "files(id, name, mimeType, modifiedTime, size, webViewLink)",
+          pageToken,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+          fields: "nextPageToken, files(id, name, mimeType, modifiedTime, size, webViewLink)",
         });
-        return json(res.data.files ?? []);
+        return json(res.data.nextPageToken ? { files: res.data.files ?? [], nextPageToken: res.data.nextPageToken } : res.data.files ?? []);
       })
     );
 
@@ -155,7 +160,13 @@ const handler = createMcpHandler(
       READ_ONLY,
       guarded(async ({ fileId }, extra: Extra) => {
         const d = drive(extra);
-        const meta = await d.files.get({ fileId, fields: "mimeType, name, size" });
+        const meta = await d.files.get({ fileId, fields: "mimeType, name, size", supportsAllDrives: true });
+
+        const mt = meta.data.mimeType ?? "";
+        if (mt === "application/pdf") throw new UserFacingError("C'est un PDF : utiliser drive_read_pdf.");
+        if (mt === DOCX_MIME) throw new UserFacingError("C'est un .docx : utiliser drive_read_docx_paragraphs.");
+        if (mt === XLSX_MIME) throw new UserFacingError("C'est un .xlsx : utiliser drive_read_spreadsheet.");
+        if (mt.endsWith("presentationml.presentation")) throw new UserFacingError("C'est un .pptx : utiliser drive_read_pptx.");
 
         // Un Google Sheets ne s'exporte pas en text/plain (erreur 400) : CSV de la 1re feuille.
         if (meta.data.mimeType === GSHEET_MIME) {
@@ -207,6 +218,11 @@ const handler = createMcpHandler(
       },
       WRITE,
       guarded(async ({ name, content, mimeType, parentFolderId }, extra: Extra) => {
+        if (NON_TEXT_MIME_PATTERN.test(mimeType)) {
+          throw new UserFacingError(
+            "Type binaire/Office/PDF : drive_create_file ne cree que du texte. Utiliser drive_create_docx(_markdown), drive_create_xlsx(_multi), drive_create_pdf, drive_create_google_doc ou drive_create_google_sheet."
+          );
+        }
         const res = await drive(extra).files.create({
           requestBody: { name, parents: parentFolderId ? [parentFolderId] : undefined },
           media: { mimeType, body: content },
@@ -226,6 +242,12 @@ const handler = createMcpHandler(
       },
       OVERWRITE,
       guarded(async ({ fileId, content, mimeType }, extra: Extra) => {
+        const current = await drive(extra).files.get({ fileId, fields: "mimeType", supportsAllDrives: true });
+        if (NON_TEXT_MIME_PATTERN.test(current.data.mimeType ?? "") || NON_TEXT_MIME_PATTERN.test(mimeType)) {
+          throw new UserFacingError(
+            "Ce fichier n'est pas un texte brut (Google natif, Office ou PDF) : drive_update_file le corromprait. Utiliser drive_gdoc_edit, drive_sheets_batch_edit, drive_xlsx_batch_edit ou drive_docx_edit."
+          );
+        }
         const res = await drive(extra).files.update({
           fileId,
           media: { mimeType, body: content },
@@ -249,6 +271,7 @@ const handler = createMcpHandler(
           fileId,
           requestBody: { trashed: true },
           fields: "id, name, trashed",
+          supportsAllDrives: true,
         });
         return {
           content: [{ type: "text", text: `Fichier "${res.data.name}" (${fileId}) place dans la corbeille.` }],
@@ -427,8 +450,10 @@ const handler = createMcpHandler(
       OVERWRITE,
       guarded(async ({ fileId, replacements }, extra: Extra) => {
         const d = drive(extra);
-        const { buffer } = await downloadBinary(d, fileId);
+        const { buffer, md5 } = await downloadBinary(d, fileId);
         const patched = await patchDocxPlaceholders(buffer, replacements);
+        await assertStillValid(patched, buffer, "docx");
+        await assertUnchanged(d, fileId, md5);
 
         const res = await d.files.update({
           fileId,
@@ -451,6 +476,7 @@ const handler = createMcpHandler(
         const res = await drive(extra).files.update({
           fileId,
           requestBody: { name: newName },
+          supportsAllDrives: true,
           fields: "id, name, webViewLink",
         });
         return json(res.data);
@@ -467,12 +493,13 @@ const handler = createMcpHandler(
       WRITE,
       guarded(async ({ fileId, newParentFolderId }, extra: Extra) => {
         const d = drive(extra);
-        const current = await d.files.get({ fileId, fields: "parents" });
+        const current = await d.files.get({ fileId, fields: "parents", supportsAllDrives: true });
         const previousParents = (current.data.parents ?? []).join(",");
 
         const res = await d.files.update({
           fileId,
           addParents: newParentFolderId,
+          supportsAllDrives: true,
           removeParents: previousParents,
           fields: "id, name, parents, webViewLink",
         });
@@ -688,6 +715,9 @@ const handler = createMcpHandler(
         return json({ ...res.data, mode: "xlsx-xml-patch-batch", cellsChanged: edited.cellsChanged, warnings: edited.warnings });
       })
     );
+
+    // PDF, Google Docs natif, conversion Microsoft <-> Google, copie, edition texte, creation riche
+    registerExtraTools(server);
 
     // ---------------------------------------------------------------------
     // Word (.docx) : lecture indexee et edition ciblee

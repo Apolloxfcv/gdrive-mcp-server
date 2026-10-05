@@ -21,6 +21,13 @@ export function getSheetsClient(accessToken: string) {
   return google.sheets({ version: "v4", auth });
 }
 
+/** Meme principe, pour l'API Google Docs (edition en place des Google Docs natifs ; le scope `drive` suffit). */
+export function getDocsClient(accessToken: string) {
+  const auth = new google.auth.OAuth2();
+  auth.setCredentials({ access_token: accessToken });
+  return google.docs({ version: "v1", auth });
+}
+
 type SealedAccess = { gat: string; cid: string; exp: number };
 
 /**
