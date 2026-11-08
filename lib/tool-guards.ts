@@ -8,6 +8,11 @@ import { z } from "zod";
 export const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES) || 20 * 1024 * 1024;
 export const MAX_UNCOMPRESSED_BYTES = 5 * MAX_DOWNLOAD_BYTES;
 export const MAX_TEXT_OUTPUT_CHARS = 500_000;
+/** Taille max d'un fichier renvoye EN ENTIER dans la conversation (base64 : +33 %). */
+export const MAX_INLINE_BYTES = Math.min(
+  Number(process.env.MAX_INLINE_DOWNLOAD_BYTES) || 10 * 1024 * 1024,
+  MAX_DOWNLOAD_BYTES
+);
 
 /**
  * ID Drive : caracteres alphanumeriques, '-' et '_' (ou l'alias "root").
@@ -49,7 +54,13 @@ export const downloadLimits = { maxContentLength: MAX_DOWNLOAD_BYTES } as const;
 
 export class UserFacingError extends Error {}
 
-type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "audio"; data: string; mimeType: string }
+  | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } };
+
+type ToolResult = { content: ToolContent[]; isError?: boolean };
 
 /**
  * Enveloppe un handler d'outil : toute erreur est convertie en message

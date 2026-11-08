@@ -38,6 +38,7 @@ fonctions serverless Next.js, avec transport **Streamable HTTP**.
 | `drive_read_pdf` | Lit le texte d'un PDF page par page (pas d'OCR) | Non |
 | `drive_create_pdf` | Cree un PDF depuis du Markdown (rendu Google, accents OK) | Oui |
 | `drive_read_pptx` | Lit le texte d'un .pptx diapositive par diapositive | Non |
+| `drive_download_file` | Renvoie le fichier brut dans la conversation (image affichee, autres types en ressource base64 ; Google natif exporte en Office ou PDF). Limite `MAX_INLINE_DOWNLOAD_BYTES` (10 Mo par defaut), au-dela renvoie le lien | Non |
 | `drive_create_google_doc` | Cree un Google Doc natif depuis du Markdown | Oui |
 | `drive_create_google_sheet` | Cree un Google Sheets natif (multi-onglets, formules) | Oui |
 | `drive_gdoc_edit` | Modifie un Google Doc natif en place (remplacer, ajouter au debut/fin), atomique | Oui |
